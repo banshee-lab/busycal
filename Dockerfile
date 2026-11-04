@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/busycal .
 
 FROM alpine:3 AS final
+LABEL org.opencontainers.image.source https://github.com/banshee-lab/busycal
 
 COPY --from=build /out/busycal /usr/local/bin/busycal
 RUN chmod +x /usr/local/bin/busycal
