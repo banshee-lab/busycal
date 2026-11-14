@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // embed tz database as fallback when the image has none
 
 	"github.com/apognu/gocal"
 	"github.com/robfig/cron/v3"
@@ -17,7 +18,6 @@ import (
 
 type slot struct {
 	Start, End time.Time
-	AllDay     bool
 }
 
 var (
@@ -56,18 +56,16 @@ func fetch(url string, from, to time.Time) ([]slot, error) {
 		if e.Start == nil {
 			continue
 		}
-		s := *e.Start
+		// Skip all-day events: DTSTART;VALUE=DATE:YYYYMMDD (no time part)
+		if e.RawStart.Params["VALUE"] == "DATE" || len(e.RawStart.Value) == 8 {
+			continue
+		}
+		s := e.Start.In(time.Local)
 		en := s
 		if e.End != nil {
-			en = *e.End
+			en = e.End.In(time.Local)
 		}
-		allDay := s.Hour() == 0 && s.Minute() == 0 && en.Sub(s) > 0 && en.Sub(s)%(24*time.Hour) == 0
-		if allDay {
-			s, en = midnight(s), midnight(en)
-		} else {
-			s, en = s.In(time.Local), en.In(time.Local)
-		}
-		out = append(out, slot{s, en, allDay})
+		out = append(out, slot{s, en})
 	}
 	return out, nil
 }
@@ -105,19 +103,16 @@ func days() map[string][]item {
 				last = s.End.Add(-time.Nanosecond)
 			}
 			for d := midnight(s.Start); !d.After(last); d = d.AddDate(0, 0, 1) {
-				txt := "Busy"
-				if !s.AllDay {
-					a, b := s.Start, s.End
-					if a.Before(d) {
-						a = d
-					}
-					if next := d.AddDate(0, 0, 1); b.After(next) {
-						b = next
-					}
-					txt = a.Format("15:04") + "–" + b.Format("15:04") + " Busy"
+				a, b := s.Start, s.End
+				if a.Before(d) {
+					a = d
 				}
+				if next := d.AddDate(0, 0, 1); b.After(next) {
+					b = next
+				}
+				txt := a.Format("15:04") + "–" + b.Format("15:04") + " Busy"
 				k := d.Format("2006-01-02")
-				res[k] = append(res[k], item{s.Start, txt})
+				res[k] = append(res[k], item{a, txt})
 			}
 		}
 	}
@@ -211,13 +206,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		cells = append(cells, c)
 		d = d.AddDate(0, 0, 1)
 	}
-	page.Execute(w, map[string]any{
+	err := page.Execute(w, map[string]any{
 		"Title":  cur.Format("January 2006"),
 		"Prev":   cur.AddDate(0, -1, 0).Format("2006-01"),
 		"Next":   cur.AddDate(0, 1, 0).Format("2006-01"),
 		"Days":   cells,
 		"Agenda": agenda,
 	})
+	if err != nil {
+		log.Printf("template error: %v", err)
+	}
 }
 
 func main() {
@@ -231,6 +229,7 @@ func main() {
 		log.Fatal("ICAL_URLS is required (comma-separated list of iCal URLs)")
 	}
 
+	log.Println("local timezone:", time.Local)
 	refresh(urls)
 	c := cron.New() // standard 5-field cron expression
 	if _, err := c.AddFunc(env("REFRESH_CRON", "*/15 * * * *"), func() { refresh(urls) }); err != nil {
@@ -241,5 +240,6 @@ func main() {
 	addr := ":" + env("PORT", "8080")
 	http.HandleFunc("/", handler)
 	log.Println("listening on", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.ListenAndServe())
 }
